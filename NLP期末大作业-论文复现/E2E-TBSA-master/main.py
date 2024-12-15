@@ -201,7 +201,7 @@ if __name__ == '__main__':
     emb2path = {
         'glove_6B': '/projdata9/info_fil/lixin/Research/OTE/embeddings/glove_6B_300d.txt',
         'glove_42B': '/projdata9/info_fil/lixin/Research/OTE/embeddings/glove_42B_300d.txt',
-        'glove_840B': 'D:/fan/homework3/glove.840B.300d.txt',
+        'glove_840B': 'projdate/glove.840B.300d.txt',
         'glove_27B100d': '/projdata9/info_fil/lixin/Research/OTE/embeddings/glove_twitter_27B_100d.txt',
         'glove_27B200d': '/projdata9/info_fil/lixin/Research/OTE/embeddings/glove_twitter_27B_200d.txt',
         'yelp_rest1': '/projdata9/info_fil/lixin/Research/yelp/yelp_vec_200_2_win5_sent.txt',
@@ -231,7 +231,8 @@ if __name__ == '__main__':
     # convert the datasets to the conll format and write them back to the specified folder
     #to_conll(train=train, val=val, test=test, ds_name=ds_name, embeddings=embeddings, vocab=vocab)
 
-    args.dim_w = len(embeddings[0])
+    #args.dim_w = len(embeddings[0])
+    args.dim_w = 768  # 更新嵌入维度为 BERT 的输出维度
     #args.dim_char = len(char_embeddings[0])
     args.dim_char = 10
     args.ote_tag_vocab = ote_tag_vocab
