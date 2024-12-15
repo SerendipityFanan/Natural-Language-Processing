@@ -1,10 +1,17 @@
 import dynet_config
+from torchtext.datasets import dataset
+
 dynet_config.set(mem='4096', random_seed=1314159)
 import dynet as dy
 import random
 from utils import *
 from evals import *
 from nltk import word_tokenize
+from transformers import BertTokenizer, BertModel
+import torch
+from transformers import BertTokenizer, BertModel
+import os
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 
 def norm_vec(vec):
@@ -30,7 +37,7 @@ def calculate_confidence(vec, proportions=0.5):
         raise Exception("Invalid square sum %.3lf" % square_sum)
     return (1 - square_sum) * proportions
 
-
+'''
 class WDEmb:
     def __init__(self, pc, n_words, dim_w, pretrained_embeddings=None):
         """
@@ -64,7 +71,27 @@ class WDEmb:
         """
         embeddings = [dy.concatenate([self.W[w] for w in ngram]) for ngram in xs]
         return embeddings
+'''
 
+class WDEmb:
+    def __init__(self, bert_model_name='bert-base-uncased'):
+        """
+        Initialize BERT-based embedding
+        """
+        self.tokenizer = BertTokenizer.from_pretrained(bert_model_name)
+        self.bert = BertModel.from_pretrained(bert_model_name)
+        self.bert.eval()  # Disable dropout
+
+    def __call__(self, sentences):
+        """
+        Generate BERT embeddings for input sentences.
+        :param sentences: List of sentences (each sentence is a list of tokens)
+        :return: Tensor of embeddings
+        """
+        inputs = self.tokenizer(sentences, return_tensors="pt", padding=True, truncation=True, is_split_into_words=True)
+        with torch.no_grad():
+            outputs = self.bert(**inputs)
+        return outputs.last_hidden_state
 
 class CharEmb:
     # build character embedding layers from random initialization
@@ -162,7 +189,8 @@ class Model:
         self.params = params
         self.name = 'lstm_cascade'
         self.dim_char = params.dim_char
-        self.dim_w = params.dim_w
+        #self.dim_w = params.dim_w
+        self.dim_w = 768  # BERT 输出的嵌入维度
         self.dim_char_h = params.dim_char_h
         self.dim_ote_h = params.dim_ote_h
         self.dim_ts_h = params.dim_ts_h
@@ -189,6 +217,11 @@ class Model:
         #self.tc_proportions = params.tc_proportions
         self.pc = dy.ParameterCollection()
 
+        # 初始化分词器和模型
+        self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+        self.bert_model = BertModel.from_pretrained('bert-base-uncased')
+
+
         if self.use_char:
             self.char_emb = CharEmb(pc=self.pc,
                                     n_chars=len(self.char_vocab),
@@ -199,7 +232,8 @@ class Model:
         else:
             dim_input = self.input_win * self.dim_w
         # word embedding layer
-        self.emb = WDEmb(pc=self.pc, n_words=len(vocab), dim_w=self.dim_w, pretrained_embeddings=embeddings)
+        #self.emb = WDEmb(pc=self.pc, n_words=len(vocab), dim_w=self.dim_w, pretrained_embeddings=embeddings)
+        self.emb = WDEmb(bert_model_name='bert-base-uncased')
 
         # lstm layers
         self.lstm_ote = dy.LSTMBuilder(1, dim_input, self.dim_ote_h, self.pc)
@@ -269,21 +303,36 @@ class Model:
         seq_len = len(wids)
 
         if self.use_char:
-            # using both character-level word representations and word-level representations
+            # 使用字符级嵌入结合 BERT 嵌入
             ch_word_emb = []
             for t in range(seq_len):
-                ch_seq = cids[t]
+                ch_seq = cids[t]  # 每个单词对应的字符序列
                 input_ch_emb = self.char_emb(xs=ch_seq)
                 ch_h0_f = self.lstm_char.initial_state()
                 ch_h0_b = self.lstm_char.initial_state()
                 ch_f = ch_h0_f.transduce(input_ch_emb)[-1]
                 ch_b = ch_h0_b.transduce(input_ch_emb[::-1])[-1]
                 ch_word_emb.append(dy.concatenate([ch_f, ch_b]))
-            word_emb = self.emb(xs=wids)
+
+            # 替换词级嵌入为 BERT 嵌入
+            sentences = [x['words'] for x in dataset]  # 提取句子
+            inputs = self.tokenizer(sentences, return_tensors='pt', padding=True, truncation=True,
+                                    is_split_into_words=True)
+            outputs = self.bert_model(**inputs)
+            bert_emb = outputs.last_hidden_state  # BERT 输出，形状：[batch_size, seq_len, hidden_dim]
+
+            # 将字符嵌入与 BERT 嵌入连接
+            word_emb = [dy.inputTensor(bert_emb[i]) for i in range(seq_len)]
             input_emb = [dy.concatenate([c, w]) for (c, w) in zip(ch_word_emb, word_emb)]
         else:
-            # only using word-level representations
-            input_emb = self.emb(xs=wids)
+            # 仅使用 BERT 嵌入
+            sentences = [x['words'] for x in dataset]  # 提取句子
+            inputs = self.tokenizer(sentences, return_tensors='pt', padding=True, truncation=True,
+                                    is_split_into_words=True)
+            outputs = self.bert_model(**inputs)
+            bert_emb = outputs.last_hidden_state  # BERT 输出，形状：[batch_size, seq_len, hidden_dim]
+
+            input_emb = [dy.inputTensor(bert_emb[i]) for i in range(seq_len)]
 
         # equivalent to applying partial dropout on the LSTM
         if is_train:
