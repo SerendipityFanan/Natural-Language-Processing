@@ -5,6 +5,10 @@ import numpy as np
 np.random.seed(7894)
 import os
 import pickle
+from transformers import BertTokenizer
+from transformers import BertModel
+import torch
+
 
 
 def ot2bio_ote(ote_tag_sequence):
@@ -426,56 +430,40 @@ def read_lexicon():
 
 def read_data(path):
     """
-    read data from the specified path
-    :param path: path of dataset
-    :return:
+    Read data and preprocess for BERT tokenizer
     """
     dataset = []
-    with open(path, encoding='UTF-8') as fp:
+    bert_tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")  # 初始化分词器
+    with open(path, encoding="UTF-8") as fp:
         for line in fp:
             record = {}
-            sent, tag_string = line.strip().split('####')
-            record['sentence'] = sent
-            word_tag_pairs = tag_string.split(' ')
-            # tag sequence for targeted sentiment
-            ts_tags = []
-            # tag sequence for opinion target extraction
-            ote_tags = []
-            # word sequence
-            words = []
+            sent, tag_string = line.strip().split("####")
+            word_tag_pairs = tag_string.split(" ")
+            words, ote_tags, ts_tags = [], [], []
+
             for item in word_tag_pairs:
-                # valid label is: O, T-POS, T-NEG, T-NEU
-                eles = item.split('=')
-                if len(eles) == 2:
-                    word, tag = eles
-                elif len(eles) > 2:
-                    tag = eles[-1]
-                    word = (len(eles) - 2) * "="
+                eles = item.split("=")
+                word, tag = eles[0], eles[-1]
                 if word not in string.punctuation:
-                    # lowercase the words
                     words.append(word.lower())
                 else:
-                    # replace punctuations with a special token
-                    words.append('PUNCT')
-                if tag == 'O':
-                    ote_tags.append('O')
-                    ts_tags.append('O')
-                elif tag == 'T-POS':
-                    ote_tags.append('T')
-                    ts_tags.append('T-POS')
-                elif tag == 'T-NEG':
-                    ote_tags.append('T')
-                    ts_tags.append('T-NEG')
-                elif tag == 'T-NEU':
-                    ote_tags.append('T')
-                    ts_tags.append('T-NEU')
+                    words.append("PUNCT")
+                if tag == "O":
+                    ote_tags.append("O")
+                    ts_tags.append("O")
+                elif tag.startswith("T-"):
+                    ote_tags.append("T")
+                    ts_tags.append(tag)
                 else:
-                    raise Exception('Invalid tag %s!!!' % tag)
-            record['words'] = words.copy()
-            record['ote_raw_tags'] = ote_tags.copy()
-            record['ts_raw_tags'] = ts_tags.copy()
+                    raise Exception("Invalid tag %s!!!" % tag)
+
+            # 使用 BERT 分词器重新分词
+            tokenized_input = bert_tokenizer.tokenize(" ".join(words))
+            record["words"] = tokenized_input
+            record["ote_raw_tags"] = ote_tags
+            record["ts_raw_tags"] = ts_tags
             dataset.append(record)
-    print("Obtain %s records from %s" % (len(dataset), path))
+    print(f"Loaded {len(dataset)} records from {path}")
     return dataset
 
 
@@ -624,54 +612,40 @@ def set_lm_labels(dataset, vocab, stm_lex, stm_win=3):
     return dataset
 
 
-def build_dataset(ds_name, input_win=1, tagging_schema='BIO', stm_win=1):
+def build_dataset(ds_name, input_win=1, tagging_schema="BIO", stm_win=1):
     """
-    build dataset for model training, development and inference
-    :param ds_name: dataset name
-    :param input_win: window size input
-    :param tagging_schema: tagging schema
-    :param stm_win: window size of context for the OE component
-    :return:
+    Build dataset for model training and inference
     """
-    # read mpqa sentiment lexicon
     stm_lex = read_lexicon()
-    # paths of training and testing dataset
-    train_path = './data/%s_train.txt' % ds_name
-    test_path = './data/%s_test.txt' % ds_name
-    # loaded datasets
-    train_set = read_data(path=train_path)
-    test_set = read_data(path=test_path)
+    train_path = f"./data/{ds_name}_train.txt"
+    test_path = f"./data/{ds_name}_test.txt"
+    train_set = read_data(train_path)
+    test_set = read_data(test_path)
 
-    vocab, char_vocab = get_vocab(train_set=train_set, test_set=test_set)
+    # 使用 BERT 嵌入
+    sentences = [record["words"] for record in train_set + test_set]
+    bert_embeddings = get_bert_embeddings(sentences)
+
+    # 构建数据集
+    vocab, char_vocab = get_vocab(train_set, test_set)
     train_set = set_wid(dataset=train_set, vocab=vocab, win=input_win)
     test_set = set_wid(dataset=test_set, vocab=vocab, win=input_win)
     train_set = set_cid(dataset=train_set, char_vocab=char_vocab)
     test_set = set_cid(dataset=test_set, char_vocab=char_vocab)
-
     train_set, ote_tag_vocab, ts_tag_vocab = set_labels(dataset=train_set, tagging_schema=tagging_schema)
     test_set, _, _ = set_labels(dataset=test_set, tagging_schema=tagging_schema)
-
     train_set = set_lm_labels(dataset=train_set, vocab=vocab, stm_lex=stm_lex, stm_win=stm_win)
     test_set = set_lm_labels(dataset=test_set, vocab=vocab, stm_lex=stm_lex, stm_win=stm_win)
 
+    # 分割训练集和验证集
     n_train = len(train_set)
-    # use 10% training data for dev experiment
     n_val = int(n_train * 0.1)
-    # generate a uniform random sample from np.range(n_train) of size n_val
-    # This is equivalent to np.random.permutation(np.arange(n_train))[:n_val]
-    
     val_sample_ids = np.random.choice(n_train, n_val, replace=False)
-    print("The first 15 validation samples:", val_sample_ids[:15])
-    val_set, tmp_train_set = [], []
-    for i in range(n_train):
-        record = train_set[i]
-        if i in val_sample_ids:
-            val_set.append(record)
-        else:
-            tmp_train_set.append(record)
-    train_set = [r for r in tmp_train_set]
+    val_set = [train_set[i] for i in val_sample_ids]
+    train_set = [train_set[i] for i in range(n_train) if i not in val_sample_ids]
 
     return train_set, val_set, test_set, vocab, char_vocab, ote_tag_vocab, ts_tag_vocab
+
 
 
 def load_embeddings(path, vocab, ds_name, emb_name):
@@ -951,4 +925,23 @@ def semeval2conll(dataset):
         # use empty line to seprate the samples
         conll_lines.append('\n')
     return conll_lines
+
+
+
+def get_bert_embeddings(sentences, bert_model_name="bert-base-uncased"):
+    """
+    Generate BERT embeddings for a list of sentences.
+    :param sentences: List of tokenized sentences (list of lists of tokens)
+    :param bert_model_name: Name of the pre-trained BERT model
+    :return: BERT embeddings (torch.Tensor)
+    """
+    tokenizer = BertTokenizer.from_pretrained(bert_model_name)
+    model = BertModel.from_pretrained(bert_model_name)
+    model.eval()  # Set model to evaluation mode
+
+    # Tokenize and convert to input IDs
+    inputs = tokenizer(sentences, is_split_into_words=True, return_tensors="pt", padding=True, truncation=True)
+    with torch.no_grad():
+        outputs = model(**inputs)
+    return outputs.last_hidden_state
 
